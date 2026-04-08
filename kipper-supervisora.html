@@ -1135,12 +1135,20 @@ async function leerBitacoraDeSheet(ssId) {
     lugar:      row[3] || '',
     frecuencia: row[4] || 'Diaria',
     desarrollo: row[5] || '',
-    // Las celdas G/H/I contienen =IMAGE(...) — no son las fotos en sí.
-    // Los fileIds se recuperan de localStorage para evitar duplicados al volver a guardar.
-    ev1: null, ev2: null, ev3: null,
-    ev1FileId: leerFileId(ssId, idx, 1),
-    ev2FileId: leerFileId(ssId, idx, 2),
-    ev3FileId: leerFileId(ssId, idx, 3),
+    // Los fileIds persisten en localStorage. Si existen, reconstruimos la URL
+    // de thumbnail para mostrar la imagen en pantalla sin necesidad del base64.
+    ...(()=>{
+      const fid1 = leerFileId(ssId, idx, 1);
+      const fid2 = leerFileId(ssId, idx, 2);
+      const fid3 = leerFileId(ssId, idx, 3);
+      return {
+        ev1: fid1 ? `https://drive.google.com/thumbnail?id=${fid1}&sz=w400` : null,
+        ev2: fid2 ? `https://drive.google.com/thumbnail?id=${fid2}&sz=w400` : null,
+        ev3: fid3 ? `https://drive.google.com/thumbnail?id=${fid3}&sz=w400` : null,
+        ev1FileId: fid1, ev2FileId: fid2, ev3FileId: fid3,
+        ev1Removed: false, ev2Removed: false, ev3Removed: false,
+      };
+    })(),
     _extra: false
   }));
 }
@@ -1196,16 +1204,24 @@ function base64ToBlob(base64Data) {
 // Si fileId existe → actualiza el contenido (PATCH) sin crear duplicado
 // Si no existe → crea nuevo archivo y devuelve { fileId, url }
 // Si base64Data es null → borra el archivo si existía
-async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo) {
-  // Borrar si se quitó la foto
+async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo, removed) {
+  // Borrar SOLO si el usuario explícitamente quitó la foto (removed=true)
+  // Si base64=null pero removed=false, significa que la foto ya estaba en Drive
+  // y solo no tenemos el base64 en memoria — conservar el archivo
   if (!base64Data) {
-    if (fileId) {
+    if (removed && fileId) {
       try {
         await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
           method: 'DELETE',
           headers: { 'Authorization': 'Bearer ' + accessToken }
         });
-      } catch(e) { /* si ya no existe, ignorar */ }
+      } catch(e) { /* ignorar si ya no existe */ }
+      return { fileId: null, url: '' };
+    }
+    // Sin base64 y sin removed → foto ya está en Drive, devolver URL existente
+    if (fileId) {
+      const url = `https://drive.google.com/thumbnail?id=${fileId}&sz=w400`;
+      return { fileId, url };
     }
     return { fileId: null, url: '' };
   }
@@ -1244,7 +1260,7 @@ async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo) {
       });
     }
 
-    // URL directa para =IMAGE() en Sheets: thumbnail de Drive
+    // URL de thumbnail público de Drive — funciona con =IMAGE() en Sheets sin autenticación
     const url = `https://drive.google.com/thumbnail?id=${resultId}&sz=w400`;
     return { fileId: resultId, url };
   } catch(e) {
@@ -1275,9 +1291,9 @@ async function escribirBitacoraAlSheet(ssId) {
     const b = state.bitacora[idx];
 
     // Gestionar cada slot de foto: subir/reemplazar/borrar según estado
-    const r1 = await gestionarFotoDrive(folderId, b.ev1, b.ev1FileId || null, `Ev_${idx+1}_1.jpg`);
-    const r2 = await gestionarFotoDrive(folderId, b.ev2, b.ev2FileId || null, `Ev_${idx+1}_2.jpg`);
-    const r3 = await gestionarFotoDrive(folderId, b.ev3, b.ev3FileId || null, `Ev_${idx+1}_3.jpg`);
+    const r1 = await gestionarFotoDrive(folderId, b.ev1, b.ev1FileId || null, `Ev_${idx+1}_1.jpg`, b.ev1Removed);
+    const r2 = await gestionarFotoDrive(folderId, b.ev2, b.ev2FileId || null, `Ev_${idx+1}_2.jpg`, b.ev2Removed);
+    const r3 = await gestionarFotoDrive(folderId, b.ev3, b.ev3FileId || null, `Ev_${idx+1}_3.jpg`, b.ev3Removed);
 
     // Persistir fileIds en estado Y localStorage para sobrevivir recargas
     state.bitacora[idx].ev1FileId = r1.fileId;
@@ -1633,13 +1649,13 @@ function generarBitacoraDesdeAreas() {
     const a = state.areas[nombre];
     if (!a || !a.cant || a.cant <= 0) return;
     if (CONSOLIDADOS.has(nombre)) {
-      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
     } else if (a.tipo === 'Extraordinaria') {
-      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
     } else {
       for (let i=1; i<=a.cant; i++) {
         const lugar = a.cant>1 ? `${nombre} ${i}` : nombre;
-        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, _extra:false });
+        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
       }
     }
   });
@@ -1650,7 +1666,7 @@ function sincronizarBitacora() {
   const nuevas = generarBitacoraDesdeAreas();
   const merged = nuevas.map(n => {
     const ex = state.bitacora.find(b => b.lugar === n.lugar);
-    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3} : n;
+    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3, ev1FileId:ex.ev1FileId, ev2FileId:ex.ev2FileId, ev3FileId:ex.ev3FileId, ev1Removed:ex.ev1Removed||false, ev2Removed:ex.ev2Removed||false, ev3Removed:ex.ev3Removed||false} : n;
   });
   const extras = state.bitacora.filter(b => b._extra);
   state.bitacora = [...merged, ...extras];
@@ -1696,9 +1712,21 @@ function renderBitacora() {
           <div class="micro-label" style="margin-top:8px">Evidencias</div>
           <div class="ev-row">
             ${[1,2,3].map(n=>{
-              const img = row[`ev${n}`];
-              return `<div class="ev-slot" onclick="abrirCamara(${idx},${n})">
-                ${img?`<img src="${img}"><button class="ev-del" onclick="event.stopPropagation();quitarFoto(${idx},${n})">×</button>`:`<span style="font-size:20px">📷</span><span>Foto ${n}</span>`}
+              const img = row[`ev${n}`];        // base64 o URL thumbnail (si se recargó de Drive)
+              const fid = row[`ev${n}FileId`];  // fileId en Drive (si ya fue subida)
+              // Una foto "en Drive" es cualquier imagen que ya existe allá:
+              // ya sea reconstruida como URL thumbnail al cargar, o recién subida
+              const esUrl     = img && (img.startsWith('http') || img.startsWith('//'));
+              const enDrive   = esUrl || (!img && fid);   // ya guardada en Drive
+              const urlMostrar = img || (fid ? `https://drive.google.com/thumbnail?id=${fid}&sz=w400` : null);
+              // Si ya está en Drive: bloquear el botón de cámara para no duplicar
+              const bloqueado = enDrive;
+              return `<div class="ev-slot" onclick="${bloqueado ? '' : `abrirCamara(${idx},${n})`}" style="${bloqueado ? 'cursor:default' : ''}">
+                ${urlMostrar
+                  ? `<img src="${urlMostrar}">
+                     <button class="ev-del" onclick="event.stopPropagation();quitarFoto(${idx},${n})">×</button>
+                     ${enDrive ? `<span style="position:absolute;bottom:2px;left:0;right:0;font-size:8px;background:rgba(31,56,100,0.75);color:white;text-align:center;padding:1px;border-radius:0 0 7px 7px">✓ Guardada</span>` : ''}`
+                  : `<span style="font-size:20px">📷</span><span>Foto ${n}</span>`}
               </div>`;
             }).join('')}
           </div>
@@ -1747,6 +1775,10 @@ function iniciarDictado(idx) {
 
 // ═══ CÁMARA ═══
 function abrirCamara(rowIdx, slot) {
+  const b = state.bitacora[rowIdx];
+  if (!b) return;
+  // Bloquear si ya hay foto (base64 en memoria o fileId en Drive)
+  if (b[`ev${slot}`] || b[`ev${slot}FileId`]) return;
   activeFotoSlot = {rowIdx, slot};
   document.getElementById('cam-input').click();
 }
@@ -1765,6 +1797,9 @@ function recibirFoto(e) {
 }
 function quitarFoto(rowIdx, slot) {
   state.bitacora[rowIdx][`ev${slot}`] = null;
+  state.bitacora[rowIdx][`ev${slot}Removed`] = true;  // marca explícita para borrar de Drive
+  state.bitacora[rowIdx][`ev${slot}FileId`] = null;
+  guardarFileId(spreadsheetId, rowIdx, slot, null);
   renderBitacora();
 }
 

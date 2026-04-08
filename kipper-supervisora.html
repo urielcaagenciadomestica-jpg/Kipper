@@ -936,7 +936,20 @@ function getClientId() {
   return localStorage.getItem('kipper_client_id') || '';
 }
 
-// Carga la librería GSI y devuelve una promesa cuando está lista
+// ── Una sola instancia del token client, creada una vez ──
+let _tokenClient = null;
+
+function obtenerTokenClient(cid) {
+  if (_tokenClient) return _tokenClient;
+  _tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: cid,
+    scope: GAPI_SCOPES,
+    callback: () => {} // se sobreescribe en cada llamada
+  });
+  return _tokenClient;
+}
+
+// Carga la librería GSI (una sola vez)
 function cargarGSI() {
   return new Promise(resolve => {
     if (window.google?.accounts?.oauth2) { resolve(); return; }
@@ -947,81 +960,53 @@ function cargarGSI() {
   });
 }
 
-// Intento silencioso primero (sin popup), si falla muestra el botón de login
-async function iniciarAutoLogin() {
-  const cid = getClientId();
-  if (!cid) return; // sin client_id no podemos hacer nada silencioso
-  await cargarGSI();
-  const client = google.accounts.oauth2.initTokenClient({
-    client_id: cid,
-    scope: GAPI_SCOPES,
-    prompt: '',          // sin prompt = intento silencioso si hay sesión activa
-    callback: (resp) => {
-      if (resp.error || !resp.access_token) return; // falló silencioso — quedamos en login
-      accessToken = resp.access_token;
-      onAuthSuccess();
-    }
-  });
-  client.requestAccessToken({ prompt: '' });
-}
-
-// Login explícito (botón presionado por la usuaria)
+// Login explícito — botón presionado por la usuaria
 async function iniciarGoogle() {
   const cid = getClientId();
   if (!cid) { openConfigModal(); return; }
   showLoader('Conectando con Google…');
   await cargarGSI();
-  solicitarToken(cid);
-}
-
-function solicitarToken(cid) {
-  const client = google.accounts.oauth2.initTokenClient({
-    client_id: cid,
-    scope: GAPI_SCOPES,
-    callback: (resp) => {
-      hideLoader();
-      if (resp.error) { toast('Error al autenticar: ' + resp.error); return; }
-      accessToken = resp.access_token;
-      onAuthSuccess();
+  const client = obtenerTokenClient(cid);
+  client.callback = (resp) => {
+    hideLoader();
+    if (resp.error || !resp.access_token) {
+      toast('Error al autenticar: ' + (resp.error || 'sin token'));
+      return;
     }
-  });
+    accessToken = resp.access_token;
+    onAuthSuccess();
+  };
   client.requestAccessToken();
 }
 
-// Renovar token silenciosamente cuando expira (llamado desde gFetch al recibir 401)
-async function renovarToken() {
+// Renovar token en silencio — llamado internamente cuando expira
+// Devuelve true si lo logró, false si necesita login manual
+async function renovarTokenSilencioso() {
   const cid = getClientId();
-  if (!cid) throw new Error('Sin client_id');
-  await cargarGSI();
-  return new Promise((resolve, reject) => {
-    const client = google.accounts.oauth2.initTokenClient({
-      client_id: cid,
-      scope: GAPI_SCOPES,
-      callback: (resp) => {
-        if (resp.error || !resp.access_token) { reject(new Error('No se pudo renovar la sesión')); return; }
-        accessToken = resp.access_token;
-        resolve();
-      }
-    });
-    client.requestAccessToken({ prompt: '' }); // sin popup si hay sesión activa en el browser
+  if (!cid || !window.google?.accounts?.oauth2) return false;
+  return new Promise(resolve => {
+    const client = obtenerTokenClient(cid);
+    client.callback = (resp) => {
+      if (resp.error || !resp.access_token) { resolve(false); return; }
+      accessToken = resp.access_token;
+      resolve(true);
+    };
+    // prompt='' = sin popup, usa sesión activa del browser
+    client.requestAccessToken({ prompt: '' });
+    // Si en 5s no responde, asumir fallo
+    setTimeout(() => resolve(false), 5000);
   });
 }
 
-async function onAuthSuccess() {
-  // Obtener perfil
-  try {
-    const r = await gFetch('https://www.googleapis.com/oauth2/v3/userinfo');
-    const av = document.getElementById('user-avatar');
-    if (r.picture) { av.innerHTML = `<img src="${r.picture}">`; }
-    else { av.textContent = (r.name||'U').charAt(0).toUpperCase(); }
-  } catch(e) {}
+// Después de obtener token exitosamente
+function onAuthSuccess() {
   showScreen('clientes');
   cargarClientes();
 }
 
 function cerrarSesion() {
   accessToken = null;
-  localStorage.removeItem('kipper_access_token');
+  _tokenClient = null;
   showScreen('login');
 }
 
@@ -1029,7 +1014,7 @@ function cerrarSesion() {
 //   GOOGLE DRIVE — helpers
 // ══════════════════════════════════════════════════════════
 
-async function gFetch(url, opts={}, _retry=false) {
+async function gFetch(url, opts={}, _reintentado=false) {
   const resp = await fetch(url, {
     ...opts,
     headers: {
@@ -1038,26 +1023,19 @@ async function gFetch(url, opts={}, _retry=false) {
       ...(opts.headers||{})
     }
   });
-  if (resp.status === 401) {
-    if (_retry) {
-      // Ya intentamos renovar y sigue fallando → volver al login
-      accessToken = null;
-      showScreen('login');
-      hideLoader();
-      toast('Sesión expirada — vuelve a iniciar sesión');
-      throw new Error('Sesión expirada');
+  if (resp.status === 401 && !_reintentado) {
+    // Token expirado — intentar renovar silenciosamente UNA sola vez
+    const renovado = await renovarTokenSilencioso();
+    if (renovado) {
+      // Token nuevo — reintentar la misma petición
+      return gFetch(url, opts, true);
     }
-    // Primer 401: intentar renovar token silenciosamente y reintentar
-    try {
-      await renovarToken();
-      return gFetch(url, opts, true); // reintento con token nuevo
-    } catch(e) {
-      accessToken = null;
-      showScreen('login');
-      hideLoader();
-      toast('Sesión expirada — vuelve a iniciar sesión');
-      throw new Error('Sesión expirada');
-    }
+    // No se pudo renovar — pedir login manual
+    accessToken = null;
+    hideLoader();
+    showScreen('login');
+    toast('Sesión expirada — vuelve a iniciar sesión');
+    throw new Error('Sesión expirada');
   }
   if (!resp.ok) {
     const err = await resp.text();
@@ -1941,14 +1919,36 @@ function toast(msg, dur=2800) {
 //   INIT
 // ══════════════════════════════════════════════════════════
 
-window.onload = () => {
+window.onload = async () => {
   // Init áreas con defaults
   const defaultAreas = {};
   [...ESPACIOS,...SERVICIOS].forEach(n => { defaultAreas[n] = {cant:0,tipo:'Rotativa'}; });
   state.areas = defaultAreas;
-  // Intentar login silencioso al cargar — si el navegador tiene sesión de Google activa
-  // el token se renueva sin mostrar popup y la usuaria entra directo a la lista de clientes.
-  iniciarAutoLogin();
+
+  // Cargar GSI en background para que el primer login sea más rápido
+  const cid = getClientId();
+  if (cid) {
+    await cargarGSI();
+    // Intento silencioso UNA sola vez al cargar — sin popup, sin loops
+    // Si falla, la usuaria presiona el botón y se hace el login normal
+    const client = obtenerTokenClient(cid);
+    let intentoCompletado = false;
+    client.callback = (resp) => {
+      intentoCompletado = true;
+      if (!resp.error && resp.access_token) {
+        accessToken = resp.access_token;
+        onAuthSuccess();
+      }
+      // Si falla, quedar en pantalla de login — normal
+    };
+    client.requestAccessToken({ prompt: '' });
+    // No esperamos — si en 3s no respondió, simplemente mostramos login
+    setTimeout(() => {
+      if (!intentoCompletado) {
+        // GSI no respondió — dejar en pantalla de login
+      }
+    }, 3000);
+  }
 };
 </script>
 </body>

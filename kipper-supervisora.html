@@ -1205,41 +1205,40 @@ function base64ToBlob(base64Data) {
 // Si no existe → crea nuevo archivo y devuelve { fileId, url }
 // Si base64Data es null → borra el archivo si existía
 async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo, removed) {
-  // Borrar SOLO si el usuario explícitamente quitó la foto (removed=true)
-  // Si base64=null pero removed=false, significa que la foto ya estaba en Drive
-  // y solo no tenemos el base64 en memoria — conservar el archivo
-  if (!base64Data) {
-    if (removed && fileId) {
-      try {
-        await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': 'Bearer ' + accessToken }
-        });
-      } catch(e) { /* ignorar si ya no existe */ }
-      return { fileId: null, url: '' };
-    }
-    // Sin base64 y sin removed → foto ya está en Drive, devolver URL existente
+  // ── Caso 1: usuario eliminó la foto explícitamente ──
+  if (removed) {
     if (fileId) {
-      const url = `https://drive.google.com/thumbnail?id=${fileId}&sz=w400`;
-      return { fileId, url };
+      try {
+        await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`,
+          { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + accessToken } });
+      } catch(e) { /* ignorar si ya no existe */ }
     }
-    return { fileId: null, url: '' };
+    return { fileId: null };
   }
 
+  // ── Caso 2: ev ya es una URL https:// (foto existente cargada desde localStorage) ──
+  // No es base64 nuevo — la foto ya está en Drive, no hacer nada
+  if (base64Data && base64Data.startsWith('https://')) {
+    return { fileId: fileId || null };
+  }
+
+  // ── Caso 3: no hay base64 ni removed → foto ya estaba, conservar ──
+  if (!base64Data) {
+    return { fileId: fileId || null };
+  }
+
+  // ── Caso 4: hay base64 real → subir o reemplazar ──
   try {
-    const { blob, mime } = base64ToBlob(base64Data);
-    let resultId = fileId;
+    const { blob } = base64ToBlob(base64Data);
 
     if (fileId) {
-      // PATCH — reemplaza contenido del archivo existente, sin mover ni duplicar
-      const form = new FormData();
-      form.append('file', blob, nombreArchivo);
+      // PATCH — reemplaza contenido sin duplicar
       const r = await fetch(
-        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,webViewLink`,
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id`,
         { method: 'PATCH', headers: { 'Authorization': 'Bearer ' + accessToken }, body: blob }
       );
       const data = await r.json();
-      resultId = data.id || fileId;
+      return { fileId: data.id || fileId };
     } else {
       // POST — crear nuevo archivo
       const meta = { name: nombreArchivo, parents: [folderId] };
@@ -1247,25 +1246,15 @@ async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo, r
       form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
       form.append('file', blob, nombreArchivo);
       const r = await fetch(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
         { method: 'POST', headers: { 'Authorization': 'Bearer ' + accessToken }, body: form }
       );
       const data = await r.json();
-      resultId = data.id;
-      // Hacer público para que Apps Script pueda leerlo
-      await fetch(`https://www.googleapis.com/drive/v3/files/${resultId}/permissions`, {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'reader', type: 'anyone' })
-      });
+      return { fileId: data.id };
     }
-
-    // URL de thumbnail público de Drive — funciona con =IMAGE() en Sheets sin autenticación
-    const url = `https://drive.google.com/thumbnail?id=${resultId}&sz=w400`;
-    return { fileId: resultId, url };
   } catch(e) {
-    console.error('Error gestionando foto:', e);
-    return { fileId: fileId || null, url: '' };
+    console.error('Error subiendo foto:', e);
+    return { fileId: fileId || null };
   }
 }
 
@@ -1285,27 +1274,32 @@ async function escribirBitacoraAlSheet(ssId) {
   const folderId = clienteActual?.id || '';
   const st = v => { if (!v) return ''; const m = String(v).match(/^([01]?\d|2[0-3]):([0-5]\d)/); return m ? m[0] : ''; };
 
-  // Procesar cada fila — gestionar fotos sin duplicar
+  // Procesar cada fila — subir fotos nuevas, conservar existentes
   const rows = [];
   for (let idx = 0; idx < state.bitacora.length; idx++) {
     const b = state.bitacora[idx];
 
-    // Gestionar cada slot de foto: subir/reemplazar/borrar según estado
     const r1 = await gestionarFotoDrive(folderId, b.ev1, b.ev1FileId || null, `Ev_${idx+1}_1.jpg`, b.ev1Removed);
     const r2 = await gestionarFotoDrive(folderId, b.ev2, b.ev2FileId || null, `Ev_${idx+1}_2.jpg`, b.ev2Removed);
     const r3 = await gestionarFotoDrive(folderId, b.ev3, b.ev3FileId || null, `Ev_${idx+1}_3.jpg`, b.ev3Removed);
 
-    // Persistir fileIds en estado Y localStorage para sobrevivir recargas
+    // Persistir fileIds en estado y localStorage
     state.bitacora[idx].ev1FileId = r1.fileId;
     state.bitacora[idx].ev2FileId = r2.fileId;
     state.bitacora[idx].ev3FileId = r3.fileId;
+    // Si había base64, actualizar ev con la URL de Drive para que en pantalla se vea bien
+    if (b.ev1 && !b.ev1.startsWith('https://') && r1.fileId)
+      state.bitacora[idx].ev1 = `https://drive.google.com/thumbnail?id=${r1.fileId}&sz=w400`;
+    if (b.ev2 && !b.ev2.startsWith('https://') && r2.fileId)
+      state.bitacora[idx].ev2 = `https://drive.google.com/thumbnail?id=${r2.fileId}&sz=w400`;
+    if (b.ev3 && !b.ev3.startsWith('https://') && r3.fileId)
+      state.bitacora[idx].ev3 = `https://drive.google.com/thumbnail?id=${r3.fileId}&sz=w400`;
     guardarFileId(spreadsheetId, idx, 1, r1.fileId);
     guardarFileId(spreadsheetId, idx, 2, r2.fileId);
     guardarFileId(spreadsheetId, idx, 3, r3.fileId);
 
-    // =IMAGE() en Sheets renderiza la imagen directamente en la celda
-    const imgFormula = url => url ? `=IMAGE("${url}",4,80,80)` : '';
-
+    // Celdas G/H/I guardan el fileId de Drive como texto plano.
+    // El Apps Script lo lee para insertar la imagen real al generar el PDF.
     rows.push([
       st(b.inicio),
       st(b.termino),
@@ -1313,9 +1307,9 @@ async function escribirBitacoraAlSheet(ssId) {
       b.lugar      || '',
       b.frecuencia || '',
       b.desarrollo || '',
-      imgFormula(r1.url),
-      imgFormula(r2.url),
-      imgFormula(r3.url)
+      r1.fileId || '',
+      r2.fileId || '',
+      r3.fileId || ''
     ]);
   }
 

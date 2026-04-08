@@ -821,9 +821,8 @@ body {
 
   <!-- BOTTOM BAR -->
   <div class="bottom-bar">
-    <button class="bb-btn bb-secondary" id="btn-pdf" onclick="exportarPDF()">🗂 Guardar PDF</button>
     <button class="bb-btn bb-primary"   onclick="sincronizarBitacora()">🔄 Actualizar</button>
-    <button class="bb-btn bb-success"   id="btn-guardar" onclick="guardarEnDrive()">💾 Guardar</button>
+    <button class="bb-btn bb-success"   id="btn-guardar" onclick="guardarEnDrive()">💾 Guardar en Drive</button>
   </div>
 </div>
 
@@ -998,6 +997,14 @@ async function gFetch(url, opts={}) {
       ...(opts.headers||{})
     }
   });
+  if (resp.status === 401) {
+    // Token expirado — limpiar y volver al login
+    accessToken = null;
+    localStorage.removeItem('kipper_access_token');
+    showScreen('login');
+    toast('Sesión expirada — vuelve a iniciar sesión');
+    throw new Error('Sesión expirada');
+  }
   if (!resp.ok) {
     const err = await resp.text();
     throw new Error(`HTTP ${resp.status}: ${err}`);
@@ -1125,45 +1132,82 @@ async function escribirCotizadorAlSheet(ssId) {
 }
 
 // ── Subir foto base64 a Drive y devolver URL ──
-async function subirFotoADrive(folderId, base64Data, nombreArchivo) {
-  if (!base64Data) return '';
+// ── Convertir base64 a Blob ──
+function base64ToBlob(base64Data) {
+  const mimeMatch = base64Data.match(/^data:([^;]+);base64,/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const base64 = base64Data.replace(/^data:[^;]+;base64,/, '');
+  const byteChars = atob(base64);
+  const byteArr = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+  return { blob: new Blob([byteArr], { type: mime }), mime };
+}
+
+// ── Subir o REEMPLAZAR foto en Drive ──
+// Si fileId existe → actualiza el contenido (PATCH) sin crear duplicado
+// Si no existe → crea nuevo archivo y devuelve { fileId, url }
+// Si base64Data es null → borra el archivo si existía
+async function gestionarFotoDrive(folderId, base64Data, fileId, nombreArchivo) {
+  // Borrar si se quitó la foto
+  if (!base64Data) {
+    if (fileId) {
+      try {
+        await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+      } catch(e) { /* si ya no existe, ignorar */ }
+    }
+    return { fileId: null, url: '' };
+  }
+
   try {
-    // Convertir base64 a Blob
-    const mimeMatch = base64Data.match(/^data:([^;]+);base64,/);
-    const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
-    const base64 = base64Data.replace(/^data:[^;]+;base64,/, '');
-    const byteChars = atob(base64);
-    const byteArr = new Uint8Array(byteChars.length);
-    for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-    const blob = new Blob([byteArr], { type: mime });
+    const { blob, mime } = base64ToBlob(base64Data);
+    let resultId = fileId;
 
-    const meta = { name: nombreArchivo, parents: [folderId] };
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
-    form.append('file', blob, nombreArchivo);
+    if (fileId) {
+      // PATCH — reemplaza contenido del archivo existente, sin mover ni duplicar
+      const form = new FormData();
+      form.append('file', blob, nombreArchivo);
+      const r = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,webViewLink`,
+        { method: 'PATCH', headers: { 'Authorization': 'Bearer ' + accessToken }, body: blob }
+      );
+      const data = await r.json();
+      resultId = data.id || fileId;
+    } else {
+      // POST — crear nuevo archivo
+      const meta = { name: nombreArchivo, parents: [folderId] };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+      form.append('file', blob, nombreArchivo);
+      const r = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink',
+        { method: 'POST', headers: { 'Authorization': 'Bearer ' + accessToken }, body: form }
+      );
+      const data = await r.json();
+      resultId = data.id;
+      // Hacer público para que Apps Script pueda leerlo
+      await fetch(`https://www.googleapis.com/drive/v3/files/${resultId}/permissions`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader', type: 'anyone' })
+      });
+    }
 
-    const r = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + accessToken },
-      body: form
-    });
-    const data = await r.json();
-    // Hacer el archivo visible para cualquiera con el link
-    await fetch(`https://www.googleapis.com/drive/v3/files/${data.id}/permissions`, {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role: 'reader', type: 'anyone' })
-    });
-    return data.webViewLink || '';
+    // URL directa para =IMAGE() en Sheets: thumbnail de Drive
+    const url = `https://drive.google.com/thumbnail?id=${resultId}&sz=w400`;
+    return { fileId: resultId, url };
   } catch(e) {
-    console.error('Error subiendo foto:', e);
-    return '';
+    console.error('Error gestionando foto:', e);
+    return { fileId: fileId || null, url: '' };
   }
 }
 
-// ── Escribir bitácora al sheet (incluyendo fotos como URLs en Drive) ──
+// ── Escribir bitácora al sheet ──
+// Las fotos se suben/reemplazan en Drive y se insertan como =IMAGE() en las celdas
 async function escribirBitacoraAlSheet(ssId) {
-  // Limpiar rango completo A4:I200 usando batchClear
+  // Limpiar rango completo A4:I200
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values:batchClear`, {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
@@ -1172,32 +1216,77 @@ async function escribirBitacoraAlSheet(ssId) {
 
   if (state.bitacora.length === 0) return;
 
-  // Subir fotos a Drive y obtener URLs
   showLoader('Subiendo evidencias a Drive…');
-  const rows = await Promise.all(state.bitacora.map(async (b, idx) => {
-    const fotoFolderId = clienteActual?.id || '';
-    const ev1 = b.ev1 ? await subirFotoADrive(fotoFolderId, b.ev1, `Evidencia_${idx+1}_1.jpg`) : '';
-    const ev2 = b.ev2 ? await subirFotoADrive(fotoFolderId, b.ev2, `Evidencia_${idx+1}_2.jpg`) : '';
-    const ev3 = b.ev3 ? await subirFotoADrive(fotoFolderId, b.ev3, `Evidencia_${idx+1}_3.jpg`) : '';
-    // sanitizeTime: solo pasar formato HH:mm válido, si no vacío
-    const st = v => { if(!v) return ''; const m = String(v).match(/^([01]?\d|2[0-3]):([0-5]\d)/); return m ? m[0] : ''; };
-    return [
+  const folderId = clienteActual?.id || '';
+  const st = v => { if (!v) return ''; const m = String(v).match(/^([01]?\d|2[0-3]):([0-5]\d)/); return m ? m[0] : ''; };
+
+  // Procesar cada fila — gestionar fotos sin duplicar
+  const rows = [];
+  for (let idx = 0; idx < state.bitacora.length; idx++) {
+    const b = state.bitacora[idx];
+
+    // Gestionar cada slot de foto: subir/reemplazar/borrar según estado
+    const r1 = await gestionarFotoDrive(folderId, b.ev1, b.ev1FileId || null, `Ev_${idx+1}_1.jpg`);
+    const r2 = await gestionarFotoDrive(folderId, b.ev2, b.ev2FileId || null, `Ev_${idx+1}_2.jpg`);
+    const r3 = await gestionarFotoDrive(folderId, b.ev3, b.ev3FileId || null, `Ev_${idx+1}_3.jpg`);
+
+    // Persistir fileIds en el estado para evitar duplicados en guardados futuros
+    state.bitacora[idx].ev1FileId = r1.fileId;
+    state.bitacora[idx].ev2FileId = r2.fileId;
+    state.bitacora[idx].ev3FileId = r3.fileId;
+
+    // =IMAGE() en Sheets renderiza la imagen directamente en la celda
+    const imgFormula = url => url ? `=IMAGE("${url}",4,80,80)` : '';
+
+    rows.push([
       st(b.inicio),
       st(b.termino),
-      b.actividad || '',
-      b.lugar     || '',
-      b.frecuencia|| '',
-      b.desarrollo|| '',
-      ev1, ev2, ev3
-    ];
-  }));
+      b.actividad  || '',
+      b.lugar      || '',
+      b.frecuencia || '',
+      b.desarrollo || '',
+      imgFormula(r1.url),
+      imgFormula(r2.url),
+      imgFormula(r3.url)
+    ]);
+  }
 
   // Escribir todas las filas A4:I(3+n)
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I${3+rows.length}?valueInputOption=USER_ENTERED`, {
-    method: 'PUT',
-    headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ values: rows })
-  });
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I${3+rows.length}?valueInputOption=USER_ENTERED`,
+    {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: rows })
+    }
+  );
+
+  // Ajustar altura de filas con imágenes a 100px
+  const rowsConFotos = rows
+    .map((r, i) => ({ i, tiene: r[6] || r[7] || r[8] }))
+    .filter(x => x.tiene);
+
+  if (rowsConFotos.length > 0) {
+    const requests = rowsConFotos.map(x => ({
+      updateDimensionProperties: {
+        range: { sheetId: 0, dimension: 'ROWS', startIndex: 3 + x.i, endIndex: 4 + x.i },
+        properties: { pixelSize: 110 },
+        fields: 'pixelSize'
+      }
+    }));
+    // Necesitamos el sheetId real de la hoja Bitácora
+    try {
+      const meta = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}?fields=sheets.properties`);
+      const hojaBit = (meta.sheets || []).find(h => h.properties.title === 'Bitácora');
+      const sheetId = hojaBit ? hojaBit.properties.sheetId : 0;
+      requests.forEach(r => r.updateDimensionProperties.range.sheetId = sheetId);
+      await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}:batchUpdate`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests })
+      });
+    } catch(e) { console.error('Error ajustando altura de filas:', e); }
+  }
 }
 
 // ── Subir PDF a Drive ──
@@ -1453,7 +1542,6 @@ function recalcular() {
   const semEl    = document.getElementById('res-sem');
   const cuotaEl  = document.getElementById('res-cuota');
   const btnGuard = document.getElementById('btn-guardar');
-  const btnPDF   = document.getElementById('btn-pdf');
 
   if (minEl)   minEl.textContent   = Math.round(minPromDia);
   if (hrsEl)   hrsEl.textContent   = horas.toFixed(1);
@@ -1465,22 +1553,18 @@ function recalcular() {
       semEl.textContent = '✗ Servicio no viable (> 8h de jornada legal)';
       semEl.className = 'semaforo sem-block';
       if (btnGuard) { btnGuard.className='bb-btn bb-danger'; btnGuard.disabled=true; }
-      if (btnPDF)   { btnPDF.className='bb-btn bb-danger';   btnPDF.disabled=true; }
     } else if (horas > 7) {
       semEl.textContent = '⚠ Límite — revisar y reducir actividades';
       semEl.className = 'semaforo sem-over';
       if (btnGuard) { btnGuard.className='bb-btn bb-success'; btnGuard.disabled=false; }
-      if (btnPDF)   { btnPDF.className='bb-btn bb-secondary'; btnPDF.disabled=false; }
     } else if (horas > 6) {
       semEl.textContent = '⚠ Se genera cuota de recuperación';
       semEl.className = 'semaforo sem-warn';
       if (btnGuard) { btnGuard.className='bb-btn bb-success'; btnGuard.disabled=false; }
-      if (btnPDF)   { btnPDF.className='bb-btn bb-secondary'; btnPDF.disabled=false; }
     } else {
       semEl.textContent = '✓ Servicio viable — carga normal';
       semEl.className = 'semaforo sem-ok';
       if (btnGuard) { btnGuard.className='bb-btn bb-success'; btnGuard.disabled=false; }
-      if (btnPDF)   { btnPDF.className='bb-btn bb-secondary'; btnPDF.disabled=false; }
     }
   }
   actualizarResumen(minPromDia, horas, cuota);
@@ -1804,17 +1888,13 @@ function toast(msg, dur=2800) {
 // ══════════════════════════════════════════════════════════
 
 window.onload = () => {
-  // Si ya tenemos un token guardado (sesión previa), intentar usarlo
-  const savedToken = localStorage.getItem('kipper_access_token');
-  if (savedToken && getClientId()) {
-    accessToken = savedToken;
-    showScreen('clientes');
-    onAuthSuccess();
-  }
   // Init áreas con defaults
   const defaultAreas = {};
   [...ESPACIOS,...SERVICIOS].forEach(n => { defaultAreas[n] = {cant:0,tipo:'Rotativa'}; });
   state.areas = defaultAreas;
+  // Los tokens OAuth duran ~1h — nunca reutilizar token guardado.
+  // Si el navegador ya tiene sesión de Google activa, el login es instantáneo (sin popup).
+  localStorage.removeItem('kipper_access_token');
 };
 </script>
 </body>

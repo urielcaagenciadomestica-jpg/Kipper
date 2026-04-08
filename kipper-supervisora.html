@@ -1112,18 +1112,35 @@ async function leerCotizadorDeSheet(ssId) {
   return { param, areas };
 }
 
+// ── Clave única para persistir fileIds en localStorage ──
+function fotoKey(ssId, rowIdx, slot) {
+  return `kfoto_${ssId}_${rowIdx}_${slot}`;
+}
+function guardarFileId(ssId, rowIdx, slot, fileId) {
+  if (fileId) localStorage.setItem(fotoKey(ssId, rowIdx, slot), fileId);
+  else localStorage.removeItem(fotoKey(ssId, rowIdx, slot));
+}
+function leerFileId(ssId, rowIdx, slot) {
+  return localStorage.getItem(fotoKey(ssId, rowIdx, slot)) || null;
+}
+
 // ── Leer bitácora del sheet ──
 async function leerBitacoraDeSheet(ssId) {
-  const r = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bitácora!A4:I200`);
+  const r = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I200`);
   const rows = r.values || [];
-  return rows.filter(r => r[3]).map(row => ({
-    inicio:    row[0] || '',
-    termino:   row[1] || '',
-    actividad: row[2] || 'Limpieza general',
-    lugar:     row[3] || '',
-    frecuencia:row[4] || 'Diaria',
-    desarrollo:row[5] || '',
+  return rows.filter(r => r[3]).map((row, idx) => ({
+    inicio:     row[0] || '',
+    termino:    row[1] || '',
+    actividad:  row[2] || 'Limpieza general',
+    lugar:      row[3] || '',
+    frecuencia: row[4] || 'Diaria',
+    desarrollo: row[5] || '',
+    // Las celdas G/H/I contienen =IMAGE(...) — no son las fotos en sí.
+    // Los fileIds se recuperan de localStorage para evitar duplicados al volver a guardar.
     ev1: null, ev2: null, ev3: null,
+    ev1FileId: leerFileId(ssId, idx, 1),
+    ev2FileId: leerFileId(ssId, idx, 2),
+    ev3FileId: leerFileId(ssId, idx, 3),
     _extra: false
   }));
 }
@@ -1262,10 +1279,13 @@ async function escribirBitacoraAlSheet(ssId) {
     const r2 = await gestionarFotoDrive(folderId, b.ev2, b.ev2FileId || null, `Ev_${idx+1}_2.jpg`);
     const r3 = await gestionarFotoDrive(folderId, b.ev3, b.ev3FileId || null, `Ev_${idx+1}_3.jpg`);
 
-    // Persistir fileIds en el estado para evitar duplicados en guardados futuros
+    // Persistir fileIds en estado Y localStorage para sobrevivir recargas
     state.bitacora[idx].ev1FileId = r1.fileId;
     state.bitacora[idx].ev2FileId = r2.fileId;
     state.bitacora[idx].ev3FileId = r3.fileId;
+    guardarFileId(spreadsheetId, idx, 1, r1.fileId);
+    guardarFileId(spreadsheetId, idx, 2, r2.fileId);
+    guardarFileId(spreadsheetId, idx, 3, r3.fileId);
 
     // =IMAGE() en Sheets renderiza la imagen directamente en la celda
     const imgFormula = url => url ? `=IMAGE("${url}",4,80,80)` : '';

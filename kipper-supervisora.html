@@ -3,10 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kipper">
 <meta name="theme-color" content="#1F3864">
 <title>Kipper — Supervisora</title>
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Kipper%20Supervisora%22%2C%22short_name%22%3A%22Kipper%22%2C%22start_url%22%3A%22.%2F%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%231F3864%22%2C%22theme_color%22%3A%22%231F3864%22%2C%22icons%22%3A%5B%7B%22src%22%3A%22data%3Aimage%2Fsvg%2Bxml%2C%253Csvg%2520xmlns%253D%2527http%253A%252F%252Fwww.w3.org%252F2000%252Fsvg%2527%2520viewBox%253D%25270%25200%2520100%2520100%2527%253E%253Crect%2520width%253D%2527100%2527%2520height%253D%2527100%2527%2520fill%253D%2527%25231F3864%2527%2520rx%253D%252720%2527%252F%253E%253Ctext%2520y%253D%2527.9em%2527%2520font-size%253D%252770%2527%2520x%253D%252715%2527%253EHK%253C%252Ftext%253E%253C%252Fsvg%253E%22%2C%22sizes%22%3A%22192x192%22%7D%5D%7D">
 
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
@@ -696,7 +699,7 @@ body {
         <div class="ah-nombre" id="ah-nombre">—</div>
         <div class="ah-fecha"  id="ah-fecha">—</div>
       </div>
-      <button class="ah-save" onclick="guardarEnDrive()">💾 Guardar</button>
+
     </div>
     <nav class="tabs">
       <button class="tab-btn active" onclick="switchTab('cotizador',this)">⚙️ Cotizador</button>
@@ -818,9 +821,9 @@ body {
 
   <!-- BOTTOM BAR -->
   <div class="bottom-bar">
-    <button class="bb-btn bb-secondary" id="btn-pdf" onclick="exportarPDF()">🗂 PDF</button>
+    <button class="bb-btn bb-secondary" id="btn-pdf" onclick="exportarPDF()">🗂 Guardar PDF</button>
     <button class="bb-btn bb-primary"   onclick="sincronizarBitacora()">🔄 Actualizar</button>
-    <button class="bb-btn bb-success"   id="btn-guardar" onclick="guardarEnDrive()">💾 Drive</button>
+    <button class="bb-btn bb-success"   id="btn-guardar" onclick="guardarEnDrive()">💾 Guardar</button>
   </div>
 </div>
 
@@ -859,6 +862,14 @@ body {
 // ══════════════════════════════════════════════════════════
 //   KIPPER SUPERVISORA — App completa con Google Drive
 // ══════════════════════════════════════════════════════════
+
+// ── HELPERS ─────────────────────────────────────────────
+// Valida que un string sea HH:mm válido — evita el warning de <input type="time">
+function sanitizarHora(v) {
+  if (!v) return '';
+  const m = String(v).match(/^([01]?\d|2[0-3]):([0-5]\d)/);
+  return m ? m[0] : '';
+}
 
 // ── CONFIG ──────────────────────────────────────────────
 const GAPI_SCOPES = 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets';
@@ -1113,20 +1124,78 @@ async function escribirCotizadorAlSheet(ssId) {
   }
 }
 
-// ── Escribir bitácora al sheet ──
+// ── Subir foto base64 a Drive y devolver URL ──
+async function subirFotoADrive(folderId, base64Data, nombreArchivo) {
+  if (!base64Data) return '';
+  try {
+    // Convertir base64 a Blob
+    const mimeMatch = base64Data.match(/^data:([^;]+);base64,/);
+    const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+    const base64 = base64Data.replace(/^data:[^;]+;base64,/, '');
+    const byteChars = atob(base64);
+    const byteArr = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([byteArr], { type: mime });
+
+    const meta = { name: nombreArchivo, parents: [folderId] };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+    form.append('file', blob, nombreArchivo);
+
+    const r = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken },
+      body: form
+    });
+    const data = await r.json();
+    // Hacer el archivo visible para cualquiera con el link
+    await fetch(`https://www.googleapis.com/drive/v3/files/${data.id}/permissions`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'reader', type: 'anyone' })
+    });
+    return data.webViewLink || '';
+  } catch(e) {
+    console.error('Error subiendo foto:', e);
+    return '';
+  }
+}
+
+// ── Escribir bitácora al sheet (incluyendo fotos como URLs en Drive) ──
 async function escribirBitacoraAlSheet(ssId) {
-  // Primero limpiar desde fila 4
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bitácora!A4:F200:clear`, {
-    method:'POST',
-    headers:{'Authorization':'Bearer '+accessToken,'Content-Type':'application/json'}
+  // Limpiar rango completo A4:I200 usando batchClear
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values:batchClear`, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ranges: ['Bitácora!A4:I200'] })
   });
-  const rows = state.bitacora.map(b => [
-    b.inicio, b.termino, b.actividad, b.lugar, b.frecuencia, b.desarrollo
-  ]);
-  if (rows.length === 0) return;
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bitácora!A4:F${3+rows.length}?valueInputOption=USER_ENTERED`, {
-    method:'PUT',
-    headers:{'Authorization':'Bearer '+accessToken,'Content-Type':'application/json'},
+
+  if (state.bitacora.length === 0) return;
+
+  // Subir fotos a Drive y obtener URLs
+  showLoader('Subiendo evidencias a Drive…');
+  const rows = await Promise.all(state.bitacora.map(async (b, idx) => {
+    const fotoFolderId = clienteActual?.id || '';
+    const ev1 = b.ev1 ? await subirFotoADrive(fotoFolderId, b.ev1, `Evidencia_${idx+1}_1.jpg`) : '';
+    const ev2 = b.ev2 ? await subirFotoADrive(fotoFolderId, b.ev2, `Evidencia_${idx+1}_2.jpg`) : '';
+    const ev3 = b.ev3 ? await subirFotoADrive(fotoFolderId, b.ev3, `Evidencia_${idx+1}_3.jpg`) : '';
+    // sanitizeTime: solo pasar formato HH:mm válido, si no vacío
+    const st = v => { if(!v) return ''; const m = String(v).match(/^([01]?\d|2[0-3]):([0-5]\d)/); return m ? m[0] : ''; };
+    return [
+      st(b.inicio),
+      st(b.termino),
+      b.actividad || '',
+      b.lugar     || '',
+      b.frecuencia|| '',
+      b.desarrollo|| '',
+      ev1, ev2, ev3
+    ];
+  }));
+
+  // Escribir todas las filas A4:I(3+n)
+  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I${3+rows.length}?valueInputOption=USER_ENTERED`, {
+    method: 'PUT',
+    headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ values: rows })
   });
 }
@@ -1466,9 +1535,9 @@ function renderBitacora() {
       <div class="bit-row-top">
         <div>
           <div class="micro-label">Inicio</div>
-          <input class="time-inp" type="time" value="${row.inicio||''}" onchange="updBit(${idx},'inicio',this.value)">
+          <input class="time-inp" type="time" value="${sanitizarHora(row.inicio)}" onchange="updBit(${idx},'inicio',this.value)">
           <div class="micro-label" style="margin-top:5px">Término</div>
-          <input class="time-inp" type="time" value="${row.termino||''}" onchange="updBit(${idx},'termino',this.value)">
+          <input class="time-inp" type="time" value="${sanitizarHora(row.termino)}" onchange="updBit(${idx},'termino',this.value)">
         </div>
         <div>
           <div class="micro-label">Actividad</div>
@@ -1607,16 +1676,17 @@ async function guardarEnDrive() {
   if (!spreadsheetId) { toast('⚠ No hay cliente activo'); return; }
   const {horas} = recalcular();
   if (horas > 8) { toast('✗ No se puede guardar — excede 8h de jornada'); return; }
-  showLoader('Guardando cambios en Drive…');
   try {
+    showLoader('Guardando cotizador…');
     await escribirCotizadorAlSheet(spreadsheetId);
+    // escribirBitacoraAlSheet maneja su propio loader para las fotos
     await escribirBitacoraAlSheet(spreadsheetId);
-    toast('✅ Cambios guardados en Drive');
+    hideLoader();
+    toast('✅ Cotizador y bitácora guardados en Drive');
   } catch(e) {
+    hideLoader();
     toast('⚠ Error al guardar: ' + e.message);
     console.error(e);
-  } finally {
-    hideLoader();
   }
 }
 
@@ -1625,38 +1695,51 @@ async function exportarPDF() {
   const {horas} = recalcular();
   if (horas > 8) { toast('✗ Servicio no viable — corrige antes de exportar'); return; }
 
-  showLoader('Generando PDF de bitácora…');
   try {
-    // Primero guardar cambios en el sheet
+    // Paso 1: Guardar cotizador y bitácora completa (con fotos)
+    showLoader('Guardando datos en Drive…');
+    await escribirCotizadorAlSheet(spreadsheetId);
     await escribirBitacoraAlSheet(spreadsheetId);
 
-    // Exportar el Google Sheet (hoja Bitácora) como PDF directamente desde Drive
-    // URL de exportación de Google Sheets a PDF, solo la hoja de Bitácora
+    // Paso 2: Esperar 3s para que Google Sheets procese los datos antes de exportar
+    showLoader('Preparando PDF…');
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Paso 3: Obtener el gid de la hoja Bitácora
     const sheetMeta = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`);
     const hojas = sheetMeta.sheets || [];
     const hojaBit = hojas.find(h => h.properties.title === 'Bitácora');
     const gid = hojaBit ? hojaBit.properties.sheetId : 0;
 
-    // La exportación de Sheets a PDF requiere el token como query param, NO como header
-    const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=pdf&gid=${gid}&portrait=true&fitw=true&size=letter&gridlines=false&printtitle=false&sheetnames=false&pagenum=UNDEFINED&attachment=true&access_token=${encodeURIComponent(accessToken)}`;
+    // Paso 4: Exportar solo la hoja Bitácora como PDF
+    // access_token va como query param — requerido por la API de exportación de Sheets
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export`
+      + `?format=pdf&gid=${gid}&portrait=true&fitw=true&size=letter`
+      + `&gridlines=false&printtitle=false&sheetnames=false&pagenum=UNDEFINED`
+      + `&attachment=true&access_token=${encodeURIComponent(accessToken)}`;
+
+    showLoader('Exportando PDF…');
     const resp = await fetch(exportUrl);
-    if (!resp.ok) throw new Error('Error al exportar PDF desde Google Sheets: ' + resp.status);
+    if (!resp.ok) throw new Error('Google Sheets devolvió error ' + resp.status + ' al exportar PDF');
     const contentType = resp.headers.get('content-type') || '';
     if (!contentType.includes('pdf')) {
       const text = await resp.text();
-      throw new Error('La respuesta no es un PDF. Google devolvió: ' + text.substring(0, 200));
+      throw new Error('Respuesta inesperada: ' + text.substring(0, 300));
     }
     const blob = await resp.blob();
 
-    // Subir el PDF a la carpeta del cliente en Drive
-    const nombrePDF = `Bitácora - ${clienteActual.nombre} - ${clienteActual.fecha}`;
+    // Paso 5: Subir el PDF a la carpeta del cliente
+    showLoader('Subiendo PDF a Drive…');
+    const fecha = new Date().toISOString().split('T')[0];
+    const nombrePDF = `Bitácora - ${clienteActual.nombre} - ${fecha}`;
     await subirPDFaDrive(clienteActual.id, nombrePDF, blob);
+
+    hideLoader();
     toast(`✅ PDF guardado en Drive: "${nombrePDF}"`);
   } catch(e) {
+    hideLoader();
     toast('⚠ Error al generar PDF: ' + e.message);
     console.error(e);
-  } finally {
-    hideLoader();
   }
 }
 

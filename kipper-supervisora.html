@@ -1152,7 +1152,7 @@ async function leerBitacoraDeSheet(ssId) {
     actividad:  row[2] || 'Limpieza general',
     lugar:      row[3] || '',
     frecuencia: row[4] || 'Diaria',
-    dias: row[9] ? String(row[9]).split(',').map(d=>d.trim()).filter(Boolean) : [],
+    dias: (row[9] && typeof row[9] === 'string' && row[9].trim()) ? row[9].split(',').map(d=>d.trim()).filter(Boolean) : [],
     desarrollo: row[5] || '',
     // Los fileIds persisten en localStorage. Si existen, reconstruimos la URL
     // de thumbnail para mostrar la imagen en pantalla sin necesidad del base64.
@@ -1329,7 +1329,7 @@ async function escribirBitacoraAlSheet(ssId) {
       r1.fileId || '',
       r2.fileId || '',
       r3.fileId || '',
-      (b.dias && b.dias.length ? b.dias.join(',') : '')
+      (Array.isArray(b.dias) && b.dias.length ? b.dias.join(',') : '')
     ]);
   }
 
@@ -1680,7 +1680,7 @@ function sincronizarBitacora() {
   const nuevas = generarBitacoraDesdeAreas();
   const merged = nuevas.map(n => {
     const ex = state.bitacora.find(b => b.lugar === n.lugar);
-    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, dias:ex.dias||[], ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3, ev1FileId:ex.ev1FileId, ev2FileId:ex.ev2FileId, ev3FileId:ex.ev3FileId, ev1Removed:ex.ev1Removed||false, ev2Removed:ex.ev2Removed||false, ev3Removed:ex.ev3Removed||false} : n;
+    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, dias:Array.isArray(ex.dias)?ex.dias:[], ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3, ev1FileId:ex.ev1FileId, ev2FileId:ex.ev2FileId, ev3FileId:ex.ev3FileId, ev1Removed:ex.ev1Removed||false, ev2Removed:ex.ev2Removed||false, ev3Removed:ex.ev3Removed||false} : n;
   });
   const extras = state.bitacora.filter(b => b._extra);
   state.bitacora = [...merged, ...extras];

@@ -434,6 +434,22 @@ body {
 .fb-diaria   { background:var(--green-bg);  color:var(--green-txt); }
 .fb-rotativa { background:var(--yellow-bg); color:var(--yellow-txt); }
 .fb-extra    { background:var(--orange-bg); color:var(--orange-txt); }
+.dias-selector { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+.dia-btn {
+  border:1.5px solid var(--blue-lt);
+  border-radius:6px;
+  padding:4px 7px;
+  font-size:10px;
+  font-weight:700;
+  color:var(--blue);
+  background:white;
+  cursor:pointer;
+  font-family:'DM Sans',sans-serif;
+  transition:all 0.15s;
+  -webkit-tap-highlight-color:transparent;
+  user-select:none;
+}
+.dia-btn.sel { background:var(--blue); color:white; border-color:var(--blue); }
 
 .detail-wrap { display:flex; gap:8px; align-items:flex-end; }
 .detail-ta {
@@ -1126,7 +1142,7 @@ function leerFileId(ssId, rowIdx, slot) {
 
 // ── Leer bitácora del sheet ──
 async function leerBitacoraDeSheet(ssId) {
-  const r = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I200`);
+  const r = await gFetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:J200`);
   const rows = r.values || [];
   return rows.filter(r => r[3]).map((row, idx) => ({
     inicio:     row[0] || '',
@@ -1135,6 +1151,7 @@ async function leerBitacoraDeSheet(ssId) {
     lugar:      row[3] || '',
     frecuencia: row[4] || 'Diaria',
     desarrollo: row[5] || '',
+    dias: row[9] ? row[9].toString().split(',').map(d=>d.trim()).filter(Boolean) : [],
     // Los fileIds persisten en localStorage. Si existen, reconstruimos la URL
     // de thumbnail para mostrar la imagen en pantalla sin necesidad del base64.
     ...(()=>{
@@ -1265,7 +1282,7 @@ async function escribirBitacoraAlSheet(ssId) {
   await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values:batchClear`, {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ranges: ['Bitácora!A4:I200'] })
+    body: JSON.stringify({ ranges: ['Bitácora!A4:J200'] })
   });
 
   if (state.bitacora.length === 0) return;
@@ -1310,12 +1327,13 @@ async function escribirBitacoraAlSheet(ssId) {
       r1.fileId || '',
       r2.fileId || '',
       r3.fileId || ''
+      (b.dias && b.dias.length ? b.dias.join(',') : '')   // ← columna J: días
     ]);
   }
 
   // Escribir todas las filas A4:I(3+n)
   await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:I${3+rows.length}?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${ssId}/values/Bit%C3%A1cora!A4:J${3+rows.length}?valueInputOption=USER_ENTERED`,
     {
       method: 'PUT',
       headers: { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
@@ -1643,13 +1661,13 @@ function generarBitacoraDesdeAreas() {
     const a = state.areas[nombre];
     if (!a || !a.cant || a.cant <= 0) return;
     if (CONSOLIDADOS.has(nombre)) {
-      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
     } else if (a.tipo === 'Extraordinaria') {
-      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
     } else {
       for (let i=1; i<=a.cant; i++) {
         const lugar = a.cant>1 ? `${nombre} ${i}` : nombre;
-        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
+        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
       }
     }
   });
@@ -1696,6 +1714,15 @@ function renderBitacora() {
         <div>
           <div class="micro-label">Frecuencia</div>
           <span class="frec-badge ${frecClass}">${row.frecuencia}</span>
+          ${row.frecuencia === 'Rotativa' ? `
+          <div class="micro-label" style="margin-top:6px">Días</div>
+          <div class="dias-selector">
+            ${['Lu','Ma','Mi','Ju','Vi','Sá','Do'].map(d => `
+              <button class="dia-btn ${(row.dias||[]).includes(d)?'sel':''}"
+                onclick="toggleDia(${idx},'${d}',this)">
+                ${d}
+              </button>`).join('')}
+          </div>` : ''}
         </div>
         <div>
           <div class="micro-label">Desarrollo / Detalle</div>
@@ -1734,7 +1761,14 @@ function renderBitacora() {
 function updBit(idx, field, val) {
   if (state.bitacora[idx]) state.bitacora[idx][field] = val;
 }
-
+function toggleDia(idx, dia, btn) {
+  const b = state.bitacora[idx];
+  if (!b) return;
+  if (!b.dias) b.dias = [];
+  const i = b.dias.indexOf(dia);
+  if (i === -1) { b.dias.push(dia); btn.classList.add('sel'); }
+  else          { b.dias.splice(i,1); btn.classList.remove('sel'); }
+}
 function agregarExtraordinaria() {
   state.bitacora.push({
     actividad:'Limpieza general', lugar:'Actividad extra', frecuencia:'Extraordinaria',

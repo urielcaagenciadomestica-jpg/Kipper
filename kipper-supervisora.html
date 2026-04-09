@@ -389,7 +389,7 @@ body {
 .bit-row.alt-row { background:var(--blue-pale); }
 .bit-row-top {
   display:grid;
-  grid-template-columns:80px 1fr 82px 1.4fr;
+  grid-template-columns:80px 1fr 100px 1.4fr;
   gap:6px;
   align-items:start;
   margin-bottom:10px;
@@ -434,20 +434,22 @@ body {
 .fb-diaria   { background:var(--green-bg);  color:var(--green-txt); }
 .fb-rotativa { background:var(--yellow-bg); color:var(--yellow-txt); }
 .fb-extra    { background:var(--orange-bg); color:var(--orange-txt); }
-.dias-selector { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+
+.dias-sel { display:flex; flex-wrap:wrap; gap:3px; margin-top:5px; }
 .dia-btn {
   border:1.5px solid var(--blue-lt);
   border-radius:6px;
-  padding:4px 7px;
+  padding:4px 6px;
   font-size:10px;
   font-weight:700;
   color:var(--blue);
   background:white;
   cursor:pointer;
   font-family:'DM Sans',sans-serif;
-  transition:all 0.15s;
+  transition:all 0.12s;
   -webkit-tap-highlight-color:transparent;
   user-select:none;
+  line-height:1;
 }
 .dia-btn.sel { background:var(--blue); color:white; border-color:var(--blue); }
 
@@ -1150,8 +1152,8 @@ async function leerBitacoraDeSheet(ssId) {
     actividad:  row[2] || 'Limpieza general',
     lugar:      row[3] || '',
     frecuencia: row[4] || 'Diaria',
+    dias: row[9] ? String(row[9]).split(',').map(d=>d.trim()).filter(Boolean) : [],
     desarrollo: row[5] || '',
-    dias: row[9] ? row[9].toString().split(',').map(d=>d.trim()).filter(Boolean) : [],
     // Los fileIds persisten en localStorage. Si existen, reconstruimos la URL
     // de thumbnail para mostrar la imagen en pantalla sin necesidad del base64.
     ...(()=>{
@@ -1326,8 +1328,8 @@ async function escribirBitacoraAlSheet(ssId) {
       b.desarrollo || '',
       r1.fileId || '',
       r2.fileId || '',
-      r3.fileId || ''
-      (b.dias && b.dias.length ? b.dias.join(',') : '')   // ← columna J: días
+      r3.fileId || '',
+      (b.dias && b.dias.length ? b.dias.join(',') : '')
     ]);
   }
 
@@ -1661,13 +1663,13 @@ function generarBitacoraDesdeAreas() {
     const a = state.areas[nombre];
     if (!a || !a.cant || a.cant <= 0) return;
     if (CONSOLIDADOS.has(nombre)) {
-      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:`${nombre} (x ${a.cant})`, frecuencia:a.tipo, dias:[], inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
     } else if (a.tipo === 'Extraordinaria') {
-      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
+      rows.push({ actividad:'Limpieza general', lugar:nombre, frecuencia:'Extraordinaria', dias:[], inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
     } else {
       for (let i=1; i<=a.cant; i++) {
         const lugar = a.cant>1 ? `${nombre} ${i}` : nombre;
-        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, dias:[], _extra:false });
+        rows.push({ actividad:'Limpieza general', lugar, frecuencia:a.tipo, dias:[], inicio:'', termino:'', desarrollo:'', ev1:null, ev2:null, ev3:null, ev1FileId:null, ev2FileId:null, ev3FileId:null, ev1Removed:false, ev2Removed:false, ev3Removed:false, _extra:false });
       }
     }
   });
@@ -1678,7 +1680,7 @@ function sincronizarBitacora() {
   const nuevas = generarBitacoraDesdeAreas();
   const merged = nuevas.map(n => {
     const ex = state.bitacora.find(b => b.lugar === n.lugar);
-    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3, ev1FileId:ex.ev1FileId, ev2FileId:ex.ev2FileId, ev3FileId:ex.ev3FileId, ev1Removed:ex.ev1Removed||false, ev2Removed:ex.ev2Removed||false, ev3Removed:ex.ev3Removed||false} : n;
+    return ex ? {...n, actividad:ex.actividad, inicio:ex.inicio, termino:ex.termino, desarrollo:ex.desarrollo, dias:ex.dias||[], ev1:ex.ev1, ev2:ex.ev2, ev3:ex.ev3, ev1FileId:ex.ev1FileId, ev2FileId:ex.ev2FileId, ev3FileId:ex.ev3FileId, ev1Removed:ex.ev1Removed||false, ev2Removed:ex.ev2Removed||false, ev3Removed:ex.ev3Removed||false} : n;
   });
   const extras = state.bitacora.filter(b => b._extra);
   state.bitacora = [...merged, ...extras];
@@ -1716,12 +1718,8 @@ function renderBitacora() {
           <span class="frec-badge ${frecClass}">${row.frecuencia}</span>
           ${row.frecuencia === 'Rotativa' ? `
           <div class="micro-label" style="margin-top:6px">Días</div>
-          <div class="dias-selector">
-            ${['Lu','Ma','Mi','Ju','Vi','Sá','Do'].map(d => `
-              <button class="dia-btn ${(row.dias||[]).includes(d)?'sel':''}"
-                onclick="toggleDia(${idx},'${d}',this)">
-                ${d}
-              </button>`).join('')}
+          <div class="dias-sel">
+            ${['Lu','Ma','Mi','Ju','Vi','Sa','Do'].map(d => `<button class="dia-btn ${(row.dias||[]).includes(d)?'sel':''}" onclick="toggleDia(${idx},'${d}',this)">${d}</button>`).join('')}
           </div>` : ''}
         </div>
         <div>
@@ -1761,6 +1759,7 @@ function renderBitacora() {
 function updBit(idx, field, val) {
   if (state.bitacora[idx]) state.bitacora[idx][field] = val;
 }
+
 function toggleDia(idx, dia, btn) {
   const b = state.bitacora[idx];
   if (!b) return;
@@ -1769,6 +1768,7 @@ function toggleDia(idx, dia, btn) {
   if (i === -1) { b.dias.push(dia); btn.classList.add('sel'); }
   else          { b.dias.splice(i,1); btn.classList.remove('sel'); }
 }
+
 function agregarExtraordinaria() {
   state.bitacora.push({
     actividad:'Limpieza general', lugar:'Actividad extra', frecuencia:'Extraordinaria',
